@@ -285,6 +285,24 @@ CREATE TABLE IF NOT EXISTS movement_plan_steps (
 CREATE INDEX IF NOT EXISTS idx_plan_steps_due
   ON movement_plan_steps(status, due_at);
 
+-- 检查点（仅已暂停的命名演练副本可创建/回退；原站场不使用本表）：
+--  - 创建时把站场定义、区段/道岔状态、进路实例与锁闭和事件、等待申请、
+--    延时取消、临时封锁、定时走行计划与设置（meta）整体快照为 JSON 存入本表，
+--    并记录当时的自增序列水位与基准时刻（暂停中的有效时刻）；
+--  - 同一副本内检查点名称唯一（重名拒绝）；
+--  - 回退在单个事务内用快照整体替换上述业务表（本表与交接单表不参与替换），
+--    未签收交接单过期、已签收单保留；自增序列恢复到检查点水位，后续编号不冲突；
+--    待处理取消与计划步骤按检查点当时的剩余时间继续冻结；
+--  - 回退不删除检查点，同一检查点可反复回退；副本保持暂停。
+CREATE TABLE IF NOT EXISTS checkpoints (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,        -- 检查点名称（同一副本内重名拒绝）
+  created_by  TEXT,                        -- 创建人（管理员）
+  created_at  INTEGER NOT NULL,            -- 创建时刻（epoch 毫秒）
+  summary     TEXT NOT NULL DEFAULT '{}',  -- 状态摘要（JSON：各类数量统计）
+  snapshot    TEXT NOT NULL                -- 全量业务快照（JSON：业务表 + 序列水位 + 基准时刻）
+);
+
 CREATE INDEX IF NOT EXISTS idx_locks_instance ON route_locks(instance_id);
 CREATE INDEX IF NOT EXISTS idx_events_instance ON section_events(instance_id, seq);
 CREATE INDEX IF NOT EXISTS idx_steps_route ON route_steps(route_id, step_order);

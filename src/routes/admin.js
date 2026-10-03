@@ -11,15 +11,20 @@ const handover = require('../handover');
 const yards = require('../yards');
 const movementPlan = require('../movement-plan');
 const pause = require('../pause');
+const checkpoint = require('../checkpoint');
 const { withYard } = require('../db');
 
 const router = express.Router();
 router.use(requireAuth('admin'));
 
-// 暂停副本：除暂停/恢复自身与从原站场创建副本外，管理台所有写操作均拒绝。
+// 暂停副本：除暂停/恢复自身、从原站场创建副本与检查点（创建/回退要求副本
+// 已暂停，路由内自行校验）外，管理台所有写操作均拒绝。
 router.use((req, _res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD') return next();
   if (['/yards', '/yards/current/pause', '/yards/current/resume'].includes(req.path)) return next();
+  if (req.path === '/yards/current/checkpoints' || req.path.startsWith('/yards/current/checkpoints/')) {
+    return next();
+  }
   try {
     pause.assertActive(req.yard.id);
     next();
@@ -98,6 +103,34 @@ router.post('/yards/current/resume', wrap((req, res) => {
     }
     result.yard = yards.getYard(req.yard.id);
   }
+  res.json({ ok: true, ...result });
+}));
+
+/* ----------------------------- 检查点（已暂停副本） ----------------------------- */
+
+// 在当前已暂停副本中创建具名检查点：同事务快照站场定义、区段/道岔状态、
+// 进路实例与锁闭和事件、等待申请、延时取消、封锁、定时走行计划与设置。
+// 同一副本内重名 409；原站场 400；运行中副本 409。
+router.post('/yards/current/checkpoints', wrap((req, res) => {
+  const cp = checkpoint.createCheckpoint(req.yard.id, (req.body || {}).name, req.session.name);
+  res.status(201).json({ ok: true, checkpoint: cp });
+}));
+
+// 检查点列表（编号/名称/创建时间/状态摘要；原站场恒为空表）
+router.get('/yards/current/checkpoints', wrap((req, res) => {
+  res.json({ ok: true, checkpoints: checkpoint.listCheckpoints() });
+}));
+
+// 查看单个检查点（未知检查点 404）
+router.get('/yards/current/checkpoints/:id', wrap((req, res) => {
+  res.json({ ok: true, checkpoint: checkpoint.getCheckpoint(req.yard.id, Number(req.params.id)) });
+}));
+
+// 把当前已暂停副本整体回退到指定检查点：单事务替换业务表，失败原状态不变；
+// 未签收交接单过期、已签收保留；检查点保留可再次使用；副本保持暂停。
+router.post('/yards/current/checkpoints/:id/rollback', wrap((req, res) => {
+  const result = checkpoint.rollbackToCheckpoint(
+    req.yard.id, Number(req.params.id), req.session.name);
   res.json({ ok: true, ...result });
 }));
 

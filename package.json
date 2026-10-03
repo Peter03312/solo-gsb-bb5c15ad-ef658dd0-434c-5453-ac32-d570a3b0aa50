@@ -15,7 +15,8 @@
     "test:yards": "node test/yards-http.cjs",
     "test:plans": "node test/movement-plan-http.cjs",
     "test:pause": "node test/pause-http.cjs",
-    "test": "npm run smoke && npm run test:waiting && npm run test:cancel && npm run test:blockade && npm run test:handover && npm run test:yards && npm run test:plans && npm run test:pause"
+    "test:checkpoint": "node test/checkpoint-http.cjs",
+    "test": "npm run smoke && npm run test:waiting && npm run test:cancel && npm run test:blockade && npm run test:handover && npm run test:yards && npm run test:plans && npm run test:pause && npm run test:checkpoint"
   },
   "engines": {
     "node": ">=18"

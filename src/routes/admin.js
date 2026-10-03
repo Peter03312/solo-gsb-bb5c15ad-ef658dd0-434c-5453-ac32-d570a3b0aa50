@@ -11,15 +11,18 @@ const handover = require('../handover');
 const yards = require('../yards');
 const movementPlan = require('../movement-plan');
 const pause = require('../pause');
+const checkpoint = require('../checkpoint');
 const { withYard } = require('../db');
 
 const router = express.Router();
 router.use(requireAuth('admin'));
 
-// 暂停副本：除暂停/恢复自身与从原站场创建副本外，管理台所有写操作均拒绝。
+// 暂停副本：除暂停/恢复自身、从原站场创建副本与检查点（创建/回退仅允许在
+// 暂停副本上进行，由处理器内部校验）外，管理台所有写操作均拒绝。
 router.use((req, _res, next) => {
   if (req.method === 'GET' || req.method === 'HEAD') return next();
   if (['/yards', '/yards/current/pause', '/yards/current/resume'].includes(req.path)) return next();
+  if (req.path === '/checkpoints' || /^\/checkpoints\/[^/]+\/restore$/.test(req.path)) return next();
   try {
     pause.assertActive(req.yard.id);
     next();
@@ -99,6 +102,36 @@ router.post('/yards/current/resume', wrap((req, res) => {
     result.yard = yards.getYard(req.yard.id);
   }
   res.json({ ok: true, ...result });
+}));
+
+/* ----------------------------- 具名检查点 ----------------------------- */
+
+// 当前站场的检查点列表（编号/名称/创建时间/状态摘要；原站场恒为空表）。
+// 只读接口，任意状态可查；创建/回退仅允许在已暂停的命名演练副本上。
+router.get('/checkpoints', wrap((req, res) => {
+  res.json({ ok: true, yard: req.yard, checkpoints: checkpoint.listCheckpoints(req.yard.id) });
+}));
+
+// 创建具名检查点：仅已暂停的命名演练副本；同一副本内重名拒绝。
+// 快照覆盖站场定义、区段与道岔状态、进路实例及锁闭与事件、等待申请、
+// 延时取消、封锁、定时走行计划与设置（含自增序号水位）。
+router.post('/checkpoints', wrap((req, res) => {
+  const cp = checkpoint.createCheckpoint(req.yard.id, (req.body || {}).name, req.session.name);
+  res.status(201).json({ ok: true, checkpoint: cp });
+}));
+
+// 查看单个检查点（未知检查点 404）
+router.get('/checkpoints/:id', wrap((req, res) => {
+  res.json({ ok: true, checkpoint: checkpoint.getCheckpoint(req.yard.id, req.params.id) });
+}));
+
+// 把当前副本整体回退到指定检查点：失败时原状态不变；成功后检查点保留
+// 可再次使用，副本保持暂停，其他站场与会话选择不受影响；未签收交接单
+// 过期、已签收历史保留；待处理取消与计划步骤按检查点当时的剩余时间
+// 继续冻结，恢复副本后按现有规则复核。
+router.post('/checkpoints/:id/restore', wrap((req, res) => {
+  const result = checkpoint.restoreCheckpoint(req.yard.id, req.params.id, req.session.name);
+  res.json({ ok: true, ...result, yard: yards.getYard(req.yard.id) });
 }));
 
 /* ----------------------------- 延时取消设置 ----------------------------- */

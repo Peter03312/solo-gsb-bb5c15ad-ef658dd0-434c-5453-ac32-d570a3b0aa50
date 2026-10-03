@@ -47,6 +47,15 @@
 规则复核。暂停状态、暂停人/时间与最近恢复信息持久化，跨服务重启有效，重复暂停或恢复
 幂等且不会重复调整到期时间。
 
+管理员还可在**已暂停的命名演练副本**中创建**具名检查点**：把该副本的站场定义、区段与
+道岔状态、进路实例及锁闭与事件、等待申请、延时取消、封锁、定时走行计划与设置整体保存
+为一份一致快照（同一副本内重名拒绝）；可查看检查点编号、名称、创建时间与状态摘要，并
+将当前副本**整体回退**到任一检查点——失败时原状态不变，成功后检查点仍可再次使用，副本
+保持暂停，其他站场与各会话的站场选择不受影响。回退时未签收交接单过期、已签收历史保留；
+检查点保留的申请顺位、实例与事件序号及自增水位原样恢复，后续编号不冲突；待处理取消与
+计划步骤按检查点当时的剩余时间继续冻结，原已到期事项在恢复副本后立即按现有规则复核、
+不重复执行。原站场或运行中副本的创建/回退、未知检查点的查看/回退一律拒绝。
+
 ## 功能概览
 
 - **管理员页面**：在 SVG 站场图上绘制轨道区段、道岔、信号机，定义起终点进路
@@ -734,7 +743,8 @@ curl -s "http://localhost:3000/api/handovers/12" -H "Authorization: Bearer $TOKE
 重置，副本的盘面、锁、申请与计划全部保留。
 
 - **允许**：所有只读查询、进路预检（`POST /routes/:id/check`）、登录会话切换、管理员
-  从原站场创建其他副本。
+  从原站场创建其他副本，以及**具名检查点的创建/查看/回退**（检查点仅能在已暂停副本
+  上操作，见"具名检查点"一节）。
 - **拒绝并说明原因**：排路/开放、走行、区段与道岔手工调整、人工解除、等待提交/撤销、
   延时取消、定时走行计划提交/终止、封锁发起/结束、交接单生成/签收、站场图/进路编辑、
   保护时长修改与站场重置等；统一返回 `409 YARD_PAUSED`。
@@ -856,14 +866,118 @@ curl -s -X PUT http://localhost:3000/api/auth/yard \
 响应约定保持不变**，只是数据作用于所选站场；例如副本里开放进路仍用
 `POST /api/routes/R1/open`，返回的实例只存在于该副本。
 
+## 具名检查点（已暂停副本的保存与回退）
+
+培训中常需要"先存个档，演练一段后再回到存档点重来"。管理员可在**已暂停的命名演练副本**
+上创建具名检查点（管理台右侧"检查点"面板，或调用下面的 HTTP API）：
+
+- **创建**：仅已暂停的命名演练副本可创建（暂停期间盘面冻结、无业务写入，快照一致）。
+  检查点把该副本业务库整体保存为一份一致快照，覆盖：站场定义、区段与道岔状态、
+  进路实例及锁闭与事件、等待申请（含提交顺位）、延时取消、临时封锁、定时走行计划与
+  步骤、交接班交接单与保护时长等设置，以及各自增序号水位。**同一副本内重名拒绝**；
+  原站场与运行中副本创建一律拒绝。
+- **查看**：管理员可查看当前站场的检查点列表与单个详情——编号、名称、创建人、创建
+  时间与状态摘要（开放进路/等待/待处理取消/未结束封锁/活动计划/待签收与已签收交接单
+  数量）。未知检查点（含其他副本的检查点）查看返回 404。
+- **回退**：把当前副本整体回退到指定检查点。先复制回滚备份、快照校验后原子替换业务库，
+  再在恢复出的库上以单个事务完成合并——**任一环节失败，副本原状态不变**。成功后：
+  - 检查点注册与快照文件保留，**可反复回退复用**；副本**保持暂停**（随后仍需管理员
+    恢复才继续运行）；其他站场与各会话的当前站场选择**不受影响**；
+  - **未签收交接单过期**（含快照带回的与回退前库中的），**已签收历史全部保留**
+    （含检查点之后签收的单据，按原编号并入，交接单序号水位同步抬升）；
+  - 检查点保留的**申请顺位、实例与事件序号**原样恢复，自增水位一并回退，恢复后
+    新产生的编号从检查点水位继续递增，**不与保留编号冲突**；
+  - 待处理延时取消与活动计划已排期步骤按**检查点当时的剩余时间**折算到当前暂停
+    纪元继续冻结（管理台/值班台显示的剩余时间与检查点当时一致）；**检查点当时已
+    到期**的事项保持到期，恢复副本后立即按现有规则复核（满足则解除/注入，不满足则
+    终止），状态机保证**不重复执行**。
+- 原站场或运行中副本的回退、未知检查点的回退一律拒绝；检查点注册保存在主库、快照
+  文件保存在业务库目录的 `checkpoints/` 子目录，**跨服务重启有效**。
+
+### 具名检查点 HTTP API（含调用示例）
+
+需管理员 Bearer 令牌（登录方式见"临时封锁 HTTP API"一节）；操作对象为**当前会话选中的
+站场**（先 `PUT /api/auth/yard` 切到目标副本）。
+
+**1) 创建检查点**（仅已暂停的命名演练副本；同一副本内重名 409）
+
+```bash
+# 先暂停当前副本
+curl -s -X POST http://localhost:3000/api/admin/yards/current/pause \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+curl -s -X POST http://localhost:3000/api/admin/checkpoints \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"演练前基线"}'
+```
+
+返回 **201**：
+
+```json
+{"ok":true,"checkpoint":{"id":1,"yardId":2,"name":"演练前基线","createdBy":"管理员",
+ "createdAt":1790900000000,"createdAtText":"2026/10/1 23:33:20",
+ "summary":{"sections":5,"switches":2,"signals":4,"routes":3,"openInstances":2,
+   "waitingApplications":1,"pendingCancellations":1,"unfinishedBlockades":1,
+   "activeMovementPlans":1,"activeHandovers":1,"signedHandovers":1}}}
+```
+
+错误：原站场 `400 CHECKPOINT_ORIGINAL_FORBIDDEN`；副本未暂停
+`409 CHECKPOINT_YARD_NOT_PAUSED`；重名 `409 CHECKPOINT_NAME_DUPLICATE`；空白/超长
+`400 CHECKPOINT_NAME_INVALID`；值班员 `403`；未登录 `401`。
+
+**2) 查看列表 / 查看单个**（只读，任意状态可查；原站场恒为空表）
+
+```bash
+curl -s http://localhost:3000/api/admin/checkpoints -H "Authorization: Bearer $ADMIN_TOKEN"
+curl -s http://localhost:3000/api/admin/checkpoints/1 -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+未知检查点返回 `404 CHECKPOINT_NOT_FOUND`。
+
+**3) 回退到检查点**（仅已暂停副本；副本保持暂停，检查点可再次使用）
+
+```bash
+curl -s -X POST http://localhost:3000/api/admin/checkpoints/1/restore \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+返回 **200**：
+
+```json
+{"ok":true,
+ "checkpoint":{"id":1,"yardId":2,"name":"演练前基线",…},
+ "detail":{"adjusted":{"cancellations":1,"movementPlanSteps":1},
+   "handovers":{"expired":1,"signedRetained":2,"merged":1}},
+ "yard":{"id":2,"name":"国庆演练A组","status":"paused","paused":true,…}}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `detail.adjusted` | 按"检查点当时的剩余时间"折算到当前暂停纪元的待处理取消数与计划已排期步骤数 |
+| `detail.handovers.expired` | 回退时过期的未签收交接单数 |
+| `detail.handovers.signedRetained` | 回退后保留的已签收交接单总数（含检查点之后签收、并入的单据） |
+| `detail.handovers.merged` | 检查点之后产生、并入回退结果的交接单数 |
+| `yard` | 回退后副本状态（仍为 `paused`） |
+
+错误：未知检查点 `404 CHECKPOINT_NOT_FOUND`；原站场 `400 CHECKPOINT_ORIGINAL_FORBIDDEN`；
+副本未暂停 `409 CHECKPOINT_YARD_NOT_PAUSED`；快照文件缺失/损坏
+`500 CHECKPOINT_FILE_MISSING / CHECKPOINT_RESTORE_FAILED`（副本原状态不变）。
+
+回退后如需继续演练，按既有约定 `POST /api/admin/yards/current/resume` 恢复副本：
+未到期事项按折算后的剩余时间继续计时，已到期事项立即按现有规则复核。
+
 ## 数据持久化与重置
 
 - **多站场存储**：主库（默认卷内 `/data/interlock.db`）只保存**站场注册表 `yards`
-  （含 `status`、暂停人/暂停时刻、最近恢复人/时刻）与登录会话 `sessions`
-  （含每会话当前站场）**；每个站场（原站场与各命名演练副本）
+  （含 `status`、暂停人/暂停时刻、最近恢复人/时刻）、登录会话 `sessions`
+  （含每会话当前站场）与检查点注册表 `yard_checkpoints`（编号/名称/创建人/创建时刻/
+  状态摘要/创建时暂停时刻）**；每个站场（原站场与各命名演练副本）
   的全部业务数据各自保存在独立业务库文件 `/data/interlock.yards/yard-<id>.db`
   （原站场固定为 `yard-1.db`）。业务库物理隔离保证副本之间、副本与原站场之间
   锁闭/等待顺位/延时取消/封锁/交接单**绝不串用**。
+  检查点快照是副本业务库的整体文件副本，保存在
+  `/data/interlock.yards/checkpoints/yard-<id>.checkpoint-<检查点编号>.db`，
+  仅已暂停副本可创建/回退，回退不改动注册表与会话选择。
 - 首次启动：主库与原站场空业务库自动建好并写入示例数据；从**旧版单库升级**时，
   启动会自动把旧主库中的全部业务数据（含历史交接单）整体迁移为原站场业务库，旧表保留。
 - 每个站场的拓扑、状态、事件、进路实例、**等待申请、延时取消申请与保护时长设置、
@@ -903,6 +1017,7 @@ curl -s -X PUT http://localhost:3000/api/auth/yard \
 │   ├── schema-yard.sql         # 每个站场业务库的表结构（原站场与副本各一份）
 │   ├── yards.js               # 命名演练副本：注册表/旧库迁移/同事务 ATTACH 复制/副本复核
 │   ├── pause.js               # 副本暂停/恢复（状态审计、活动计划与延时取消到期时间平移）
+│   ├── checkpoint.js          # 具名检查点：暂停副本整体快照/列表/回退（剩余时间折算、交接单合并）
 │   ├── seed.js                # 示例站场
 │   ├── auth.js                # 会话与鉴权（解析当前站场并绑定 withYard 上下文）
 │   ├── interlocking.js        # 核心联锁逻辑（开放/事件/解锁/扳岔，含封锁校验）
@@ -924,13 +1039,14 @@ curl -s -X PUT http://localhost:3000/api/auth/yard \
     ├── handover-http.cjs     # 交接单 HTTP 端到端测试（含六类变化/重复签收/并发/重置/重启）
     ├── yards-http.cjs        # 命名副本 HTTP 端到端测试（同事务复制/选择/独立运行/隔离/重启逐站场复核）
     ├── movement-plan-http.cjs# 定时走行计划 HTTP 端到端测试（校验/自动走行/人工抢先/终止/取消/重启/副本不复制）
-    └── pause-http.cjs        # 副本暂停/恢复 HTTP 端到端测试（写操作拒绝/冻结计时/退出撤销/重启/幂等）
+    ├── pause-http.cjs        # 副本暂停/恢复 HTTP 端到端测试（写操作拒绝/冻结计时/退出撤销/重启/幂等）
+    └── checkpoint-http.cjs   # 具名检查点 HTTP 端到端测试（暂停副本创建/回退/交接单合并/剩余时间冻结/序号水位/重启复用）
 ```
 
 ## 测试
 
 ```bash
-npm test             # 联锁冒烟 + 等待 + 延时取消 + 临时封锁 + 交接班 + 命名副本 + 定时走行计划 + 暂停恢复端到端
+npm test             # 联锁冒烟 + 等待 + 延时取消 + 临时封锁 + 交接班 + 命名副本 + 定时走行计划 + 暂停恢复 + 具名检查点端到端
 npm run smoke        # 联锁核心规则
 npm run test:waiting# 等待申请提交/撤销/顺位/自动兑现/失效/重启
 npm run test:cancel  # 延时取消申请/重复幂等/到期解除/首段占用终止/区段占用终止/重启/重置
@@ -939,4 +1055,5 @@ npm run test:handover# 交接单生成/六类快照/签收原子判定/变化过
 npm run test:yards  # 副本同事务复制/同名拒绝/会话选择/副本与原站场独立不串用/越权/重启逐站场复核
 npm run test:plans  # 定时走行计划提交校验/自动依序走行完成/人工抢先停止不重发/本人终止不解除/延时取消停止/重启逾期依序处理/副本不复制活动计划
 npm run test:pause  # 原站场不可暂停/写操作拒绝/定时任务冻结/退出撤销不兑现/跨重启/恢复平移与幂等
+npm run test:checkpoint # 检查点创建/重名拒绝/整体回退/交接单未签收过期已签收保留/剩余时间冻结/序号不冲突/重启复用
 ```

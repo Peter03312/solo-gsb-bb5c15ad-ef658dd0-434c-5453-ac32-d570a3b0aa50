@@ -35,3 +35,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   current_yard_id INTEGER,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- 命名演练副本的具名检查点注册（快照元数据；快照本体是副本业务库的整体
+-- 文件副本，存放在业务库目录的 checkpoints/ 子目录）。
+-- 仅已暂停的命名演练副本可创建/回退；同一副本内检查点名称唯一（重名拒绝）。
+CREATE TABLE IF NOT EXISTS yard_checkpoints (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  yard_id    INTEGER NOT NULL REFERENCES yards(id),  -- 所属副本（永远不是原站场）
+  name       TEXT NOT NULL,                          -- 检查点名称（同一副本内唯一）
+  file       TEXT NOT NULL,                          -- 快照文件名（相对 checkpoints/ 目录）
+  summary    TEXT NOT NULL DEFAULT '{}',             -- 创建时刻状态摘要（JSON：各类数量）
+  paused_at  INTEGER,                                -- 创建时副本的暂停时刻（epoch 毫秒，回退时折算剩余时间）
+  created_by TEXT,                                   -- 创建人（管理员姓名）
+  created_at INTEGER NOT NULL,                       -- 创建时刻（epoch 毫秒）
+  UNIQUE (yard_id, name)
+);

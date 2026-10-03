@@ -1,7 +1,8 @@
 'use strict';
 
-/* 管理员工作台：绘制站场图、定义进路、重置推演状态 */
+/* 管理员工作台：绘制站场图、定义进路、重置推演状态、副本检查点 */
 let STATE = null;
+let CHECKPOINTS = [];      // 当前站场的具名检查点列表
 let tool = 'select';
 let drawFirst = null;        // 画区段时的第一个端点
 let routeBuilder = null;     // {steps:[sectionId], switches:[{switchId,position}]}
@@ -34,6 +35,10 @@ async function load(manual) {
     const data = await api('/api/admin/state');
     STATE = data.state;
     syncYard(data.yard || (STATE && STATE.yard));
+    try {
+      const cp = await api('/api/admin/checkpoints');
+      CHECKPOINTS = cp.checkpoints || [];
+    } catch (_) { CHECKPOINTS = []; }
     drawFirst = null;
     renderYard();
     renderSide();
@@ -545,6 +550,9 @@ function renderSide() {
   // 临时封锁
   side.appendChild(renderBlockadePanel());
 
+  // 具名检查点（仅已暂停的命名演练副本可创建/回退）
+  side.appendChild(renderCheckpointPanel());
+
   // 推演管理
   side.appendChild(html('div', { class: 'section-title' }, '推演管理'));
 
@@ -673,6 +681,96 @@ function renderBlockadePanel() {
         } catch (e) { toast(e.message, 'err', 6000); }
       });
       row.appendChild(endBtn);
+      card.appendChild(row);
+    }
+    box.appendChild(card);
+  }
+  return box;
+}
+
+/* ============================== 具名检查点 ============================== */
+
+function renderCheckpointPanel() {
+  const box = html('div', {});
+  box.appendChild(html('div', { class: 'section-title' },
+    `检查点（${CHECKPOINTS.length}）`));
+
+  const yard = STATE.yard || {};
+  const usable = !yard.isOriginal && yard.paused;
+  if (yard.isOriginal) {
+    box.appendChild(html('div', { class: 'hint' },
+      '原站场不支持检查点；请切换到命名演练副本并暂停后使用。'));
+  } else if (!yard.paused) {
+    box.appendChild(html('div', { class: 'hint' },
+      '仅已暂停的命名演练副本可创建/回退检查点；请先在顶栏"暂停演练"。' +
+      '暂停期间盘面冻结，检查点快照保持一致。'));
+  }
+
+  // 创建表单（仅已暂停副本可用）
+  if (usable) {
+    const form = html('div', { class: 'row' });
+    const nameIn = html('input', { type: 'text', maxlength: '30',
+      placeholder: '检查点名称（同一副本内重名拒绝）', style: 'flex:1;min-width:120px;' });
+    const createBtn = html('button', { class: 'primary small' }, '创建检查点');
+    createBtn.addEventListener('click', async () => {
+      const name = nameIn.value.trim();
+      if (!name) return toast('请填写检查点名称', 'err');
+      try {
+        const data = await api('/api/admin/checkpoints', {
+          method: 'POST', body: JSON.stringify({ name })
+        });
+        const s = data.checkpoint.summary || {};
+        toast(`检查点 #${data.checkpoint.id}「${data.checkpoint.name}」已创建：` +
+          `开放进路 ${s.openInstances}、等待 ${s.waitingApplications}、` +
+          `延时取消 ${s.pendingCancellations}、封锁 ${s.unfinishedBlockades}、` +
+          `活动计划 ${s.activeMovementPlans}`, 'ok', 6000);
+        await load(true);
+      } catch (e) { toast(e.message, 'err', 6000); }
+    });
+    form.appendChild(nameIn);
+    form.appendChild(createBtn);
+    box.appendChild(form);
+    box.appendChild(html('div', { class: 'hint', style: 'margin-top:6px;' },
+      '检查点保存当前副本的站场定义、区段与道岔状态、进路实例及锁闭与事件、' +
+      '等待申请、延时取消、封锁、定时走行计划与设置；回退整体恢复到检查点，' +
+      '副本保持暂停，未签收交接单过期、已签收保留。'));
+  }
+
+  if (!CHECKPOINTS.length) {
+    box.appendChild(html('div', { class: 'hint', style: 'margin-top:6px;' }, '暂无检查点'));
+    return box;
+  }
+  for (const cp of CHECKPOINTS.slice().reverse()) {
+    const s = cp.summary || {};
+    const card = html('div', { class: 'instance-card', style: 'margin-top:8px;' });
+    const head = html('div', { class: 'row' });
+    head.appendChild(html('b', {}, `#${cp.id} ${cp.name}`));
+    head.appendChild(html('span', { class: 'muted', style: 'flex:1;' }));
+    head.appendChild(html('span', { class: 'badge green' }, '可用'));
+    card.appendChild(head);
+    card.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;' },
+      `创建：${cp.createdBy || '管理员'} · ${cp.createdAtText || ''}`));
+    card.appendChild(html('div', { class: 'hint', style: 'margin-top:2px;' },
+      `摘要：开放进路 ${s.openInstances ?? 0}｜等待 ${s.waitingApplications ?? 0}｜` +
+      `延时取消 ${s.pendingCancellations ?? 0}｜封锁 ${s.unfinishedBlockades ?? 0}｜` +
+      `活动计划 ${s.activeMovementPlans ?? 0}｜待签收交接单 ${s.activeHandovers ?? 0}`));
+    if (usable) {
+      const row = html('div', { class: 'row', style: 'margin-top:6px;' });
+      const restoreBtn = html('button', { class: 'danger small' }, '回退到此检查点');
+      restoreBtn.addEventListener('click', async () => {
+        if (!confirm(`将当前副本整体回退到检查点 #${cp.id}「${cp.name}」？\n` +
+          '当前盘面将被检查点状态整体替换（失败时原状态不变）；\n' +
+          '未签收交接单过期、已签收历史保留；副本保持暂停，检查点可再次使用。')) return;
+        try {
+          const data = await api(`/api/admin/checkpoints/${cp.id}/restore`, { method: 'POST' });
+          const h = (data.detail && data.detail.handovers) || {};
+          toast(`已回退到检查点 #${cp.id}「${cp.name}」：` +
+            `未签收交接单过期 ${h.expired ?? 0}、已签收保留 ${h.signedRetained ?? 0}；` +
+            '副本保持暂停', 'ok', 6000);
+          await load(true);
+        } catch (e) { toast(e.message, 'err', 6000); }
+      });
+      row.appendChild(restoreBtn);
       card.appendChild(row);
     }
     box.appendChild(card);
